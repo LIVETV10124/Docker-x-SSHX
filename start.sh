@@ -17,6 +17,13 @@ log()  { echo -e "${GREEN}[✔]${RESET} $*"; }
 warn() { echo -e "${YELLOW}[!]${RESET} $*"; }
 err()  { echo -e "${RED}[✖]${RESET} $*"; }
 
+# ── Helper: extract clean URL (strips ANSI codes first) ──
+get_sshx_url() {
+  sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$SSHX_LOG" 2>/dev/null \
+    | grep -oE 'https://sshx\.io/s/[A-Za-z0-9_#]+' \
+    | head -1 || true
+}
+
 cleanup() {
   warn "Shutting down …"
   [[ -n "$SSHX_PID"  ]] && kill "$SSHX_PID"  2>/dev/null || true
@@ -32,18 +39,19 @@ echo "╚═══════════════════════�
 echo -e "${RESET}"
 
 # ─────────────────────────────────────────────────
-# 1) Start HTTP server + self-ping DIRECTLY inline
+# 1) Start HTTP server + self-ping
 # ─────────────────────────────────────────────────
 log "Starting control panel on port ${PORT} …"
 
 python3 - <<'PYEND' &
-import http.server, socketserver, threading, urllib.request, time, os, json
+import http.server, socketserver, threading, urllib.request, time, os, json, re
 from datetime import datetime
 
 PORT = int(os.environ.get("PORT", 10000))
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 PING_INTERVAL = int(os.environ.get("PING_INTERVAL", 120))
 SSHX_LOG = "/tmp/sshx.log"
+ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 
 stats = {
     "start": datetime.now().isoformat(),
@@ -55,9 +63,10 @@ def get_url():
     try:
         with open(SSHX_LOG) as f:
             for l in f:
-                if "https://sshx.io/s/" in l:
-                    s = l.index("https://sshx.io/s/")
-                    return l[s:].strip().split()[0]
+                clean = ANSI_RE.sub('', l)
+                if "https://sshx.io/s/" in clean:
+                    s = clean.index("https://sshx.io/s/")
+                    return clean[s:].strip().split()[0]
     except: pass
     return ""
 
@@ -143,20 +152,17 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self,*a): pass
 
 threading.Thread(target=ping_loop, daemon=True).start()
-print(f"[✔] Listening on 0.0.0.0:{PORT}", flush=True)
+print(f"[OK] Listening on 0.0.0.0:{PORT}", flush=True)
 socketserver.TCPServer(("0.0.0.0", PORT), H).serve_forever()
 PYEND
 
 SERVER_PID=$!
-
-# Give it time to bind
 sleep 2
 
 if kill -0 "$SERVER_PID" 2>/dev/null; then
-  log "Control panel running (PID: $SERVER_PID) ✓"
+  log "Control panel running (PID: $SERVER_PID)"
 else
-  err "Server failed! Check python3 …"
-  python3 --version
+  err "Server failed!"
   exit 1
 fi
 
@@ -172,23 +178,24 @@ if ! command -v sshx &>/dev/null; then
 fi
 log "sshx: $(which sshx)"
 
+# ── Strip ANSI from sshx output before logging ──
 > "$SSHX_LOG"
-sshx --shell bash 2>&1 | tee "$SSHX_LOG" &
+sshx --shell bash 2>&1 | sed -u 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tee "$SSHX_LOG" &
 SSHX_PID=$!
 log "sshx launched (PID: $SSHX_PID)"
 
 # ─────────────────────────────────────────────────
-# 3) Wait for URL
+# 3) Wait for clean URL
 # ─────────────────────────────────────────────────
 URL=""
 for i in $(seq 1 60); do
-  URL=$(grep -oE 'https://sshx\.io/s/[A-Za-z0-9_#/?=&-]+' "$SSHX_LOG" 2>/dev/null | head -1 || true)
+  URL=$(get_sshx_url)
   if [[ -n "$URL" ]]; then
     echo ""
     echo -e "${GREEN}═══════════════════════════════════════════════════${RESET}"
-    echo -e "${GREEN}  🔗  sshx:      ${CYAN}${URL}${RESET}"
-    echo -e "${GREEN}  🖥️  Panel:     ${CYAN}https://<app>.onrender.com${RESET}"
-    echo -e "${GREEN}  📡  Self-ping: ${CYAN}Active${RESET}"
+    echo -e "${GREEN}  🔗  sshx:      ${RESET}${URL}"
+    echo -e "${GREEN}  🖥️  Panel:     ${RESET}https://<app>.onrender.com"
+    echo -e "${GREEN}  📡  Self-ping: ${RESET}Active"
     echo -e "${GREEN}═══════════════════════════════════════════════════${RESET}"
     echo ""
     break
@@ -207,24 +214,23 @@ while true; do
   if ! kill -0 "$SSHX_PID" 2>/dev/null; then
     warn "sshx died — restarting …"
     > "$SSHX_LOG"
-    sshx --shell bash 2>&1 | tee "$SSHX_LOG" &
+    sshx --shell bash 2>&1 | sed -u 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tee "$SSHX_LOG" &
     SSHX_PID=$!
     sleep 5
-    URL=$(grep -oE 'https://sshx\.io/s/[A-Za-z0-9_#/?=&-]+' "$SSHX_LOG" 2>/dev/null | head -1 || true)
+    URL=$(get_sshx_url)
     [[ -n "$URL" ]] && log "New URL: $URL"
   fi
 
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     warn "Server died — restarting …"
-    python3 - <<'RESPAWN' &
-import http.server,socketserver
+    python3 -c "
+import http.server,socketserver,os
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200);self.end_headers();self.wfile.write(b"OK")
+        self.send_response(200);self.end_headers();self.wfile.write(b'OK')
     def log_message(self,*a):pass
-import os; P=int(os.environ.get("PORT",10000))
-socketserver.TCPServer(("0.0.0.0",P),H).serve_forever()
-RESPAWN
+socketserver.TCPServer(('0.0.0.0',int(os.environ.get('PORT',10000))),H).serve_forever()
+" &
     SERVER_PID=$!
   fi
 
