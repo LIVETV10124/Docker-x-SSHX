@@ -2,8 +2,9 @@
 set -eo pipefail
 
 SSHX_PID=""
+SERVER_PID=""
 SSHX_LOG="/tmp/sshx.log"
-PORT="${PORT:-4200}"
+PORT="${PORT:-10000}"
 
 GREEN="\033[1;32m"
 CYAN="\033[1;36m"
@@ -17,34 +18,26 @@ err()  { echo -e "${RED}[✖]${RESET} $*"; }
 
 cleanup() {
   warn "Shutting down …"
-  [[ -n "$SSHX_PID" ]]   && kill "$SSHX_PID"   2>/dev/null || true
-  [[ -n "$SHELL_PID" ]]   && kill "$SHELL_PID"   2>/dev/null || true
+  [[ -n "$SSHX_PID"   ]] && kill "$SSHX_PID"   2>/dev/null || true
+  [[ -n "$SERVER_PID"  ]] && kill "$SERVER_PID"  2>/dev/null || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
 echo -e "${CYAN}"
-echo "╔══════════════════════════════════════════════╗"
-echo "║   🚀  Shellinabox + sshx on Render  🚀      ║"
-echo "╚══════════════════════════════════════════════╝"
+echo "╔══════���════════════════════════════════════════════╗"
+echo "║   🚀  sshx + Self Keep-Alive Control Panel  🚀    ║"
+echo "║   No cron-job.org needed — built-in self-ping     ║"
+echo "╚═══════════════════════════════════════════════════╝"
 echo -e "${RESET}"
 
-# ─────────────────────────────────────────
-# 1) Start Shellinabox (keeps Render happy)
-# ─────────────────────────────────────────
-log "Starting Shellinabox on port ${PORT} …"
-/usr/bin/shellinaboxd \
-  --no-beep \
-  -t \
-  -p "$PORT" \
-  -s "/:LOGIN" \
-  --disable-ssl-menu &
-SHELL_PID=$!
-log "Shellinabox running (PID: $SHELL_PID)"
+# ── 1) Start web control panel + self-ping ──
+log "Starting control panel + self-ping on port ${PORT} …"
+python3 /app/server.py &
+SERVER_PID=$!
+log "Control panel running (PID: $SERVER_PID)"
 
-# ─────────────────────────────────────────
-# 2) Make sure sshx is on PATH
-# ─────────────────────────────────────────
+# ── 2) Ensure sshx is on PATH ──
 export PATH="$HOME/.sshx/bin:$HOME/.cargo/bin:/usr/local/bin:$PATH"
 
 if ! command -v sshx &>/dev/null; then
@@ -55,49 +48,41 @@ fi
 
 log "sshx ready: $(which sshx)"
 
-# ─────────────────────────────────────────
-# 3) Launch sshx
-# ─────────────────────────────────────────
-log "Launching sshx …"
+# ── 3) Launch sshx ──
 > "$SSHX_LOG"
 sshx --shell bash 2>&1 | tee "$SSHX_LOG" &
 SSHX_PID=$!
+log "sshx launched (PID: $SSHX_PID)"
 
-# ─────────────────────────────────────────
-# 4) Wait for sshx URL and display it
-# ─────────────────────────────────────────
+# ── 4) Wait for URL ──
 URL=""
 for i in $(seq 1 60); do
   URL=$(grep -oE 'https://sshx\.io/s/[A-Za-z0-9_#/?=&-]+' "$SSHX_LOG" 2>/dev/null | head -1 || true)
   if [[ -n "$URL" ]]; then
     echo ""
-    echo -e "${CYAN}═══════════════════════════════════════════════════${RESET}"
-    echo -e "${GREEN}  🔗  sshx URL:${RESET}  ${CYAN}${URL}${RESET}"
-    echo -e "${GREEN}  🖥️  Shell:${RESET}    ${CYAN}https://<your-app>.onrender.com${RESET}"
-    echo -e "${GREEN}  🔑  Login:${RESET}    root / root"
-    echo -e "${CYAN}═══════════════════════════════════════════════════${RESET}"
+    echo -e "${GREEN}═══════════════════════════════════════════════════════${RESET}"
+    echo -e "${GREEN}  🔗  sshx:      ${CYAN}${URL}${RESET}"
+    echo -e "${GREEN}  🖥️  Dashboard:  ${CYAN}https://<your-app>.onrender.com${RESET}"
+    echo -e "${GREEN}  📡  Self-ping:  ${CYAN}Active (every ${PING_INTERVAL:-120}s)${RESET}"
+    echo -e "${GREEN}═══════════════════════════════════════════════════════${RESET}"
     echo ""
     break
   fi
   sleep 1
 done
 
-if [[ -z "$URL" ]]; then
-  err "Timed out waiting for sshx URL"
-  cat "$SSHX_LOG" 2>/dev/null
-fi
+[[ -z "$URL" ]] && err "Timed out waiting for sshx URL" && cat "$SSHX_LOG" 2>/dev/null
 
-# ─────────────────────────────────────────
-# 5) Keep alive — restart if anything dies
-# ─────────────────────────────────────────
-log "Running. Monitoring processes …"
+# ── 5) Keep alive + auto-restart ──
+log "Monitoring processes …"
+log "✅ Self-ping replaces cron-job.org — nothing external needed!"
 
 while true; do
-  # Restart shellinabox if dead
-  if ! kill -0 "$SHELL_PID" 2>/dev/null; then
-    warn "Shellinabox died — restarting …"
-    /usr/bin/shellinaboxd --no-beep -t -p "$PORT" -s "/:LOGIN" --disable-ssl-menu &
-    SHELL_PID=$!
+  # Restart control panel if dead
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    warn "Control panel died — restarting …"
+    python3 /app/server.py &
+    SERVER_PID=$!
   fi
 
   # Restart sshx if dead
