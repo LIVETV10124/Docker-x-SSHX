@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: sshx-shell
+    runtime: docker
+    plan: free            # or starter / standard
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: "10000"
+    healthCheckPath: ""   # disable health checks
