@@ -9,5 +9,3 @@ services:
         value: "10000"
       - key: PING_INTERVAL
         value: "120"
-      - key: RENDER_EXTERNAL_URL
-        sync: false   # Render auto-sets this
