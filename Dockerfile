@@ -21,7 +21,7 @@ RUN echo "root:root" | chpasswd
 # Pre-install sshx at build time
 RUN curl -sSf https://sshx.io/get | sh
 
-WORKDIR /app
+WORKDIR /
 COPY start.sh .
 RUN chmod +x start.sh
 
