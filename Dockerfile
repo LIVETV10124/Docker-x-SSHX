@@ -31,6 +31,3 @@ EXPOSE 10000
 
 CMD ["./start.sh"]
 
-EXPOSE 4200
-
-CMD ["./start.sh"]
